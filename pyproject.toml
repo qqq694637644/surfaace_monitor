@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "surfaace-monitor"
+version = "0.1.0"
+description = "Read-only, long-running Surface Pro thermal and Hollow Knight frame-time monitor."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["psutil>=5.9,<8"]
+
+[project.optional-dependencies]
+charts = ["matplotlib>=3.8,<4"]
+dev = ["pytest>=8,<10", "matplotlib>=3.8,<4"]
+
+[project.scripts]
+surfaace-monitor = "surfaace_monitor.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
