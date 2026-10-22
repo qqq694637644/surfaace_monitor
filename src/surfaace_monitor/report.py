@@ -50,6 +50,18 @@ def session_summary(store: Storage, sid: str) -> dict[str, Any]:
         warnings.append("No PresentMon frame data imported. FPS/frametime unavailable.")
     elif perf["correlated_frames"] == 0:
         warnings.append("PresentMon rows have no absolute timestamps; cannot correlate FPS and temperatures.")
+    if ("AcpiThermalZone", "Temperature") in available:
+        warnings.append(
+            "ACPI firmware thermal-zone temperatures are NOT CPU package/core temperatures."
+        )
+    if ("WindowsPerfCounter", "Performance") in available:
+        warnings.append(
+            "Windows PDH Processor Performance is a relative percentage, NOT measured CPU MHz."
+        )
+    for record in coverage:
+        if (record["hardware_type"] == "Cpu" and record["sensor_type"] == "Power"
+                and record["min_value"] == 0 and record["max_value"] == 0):
+            warnings.append("CPU power sensors reported only 0 W; may be inaccessible, not true idle power.")
     warnings.append(
         "Frequency drops alone do not prove thermal throttling or PL1/PL2 throttling. "
         "Confirm with supported limit flags / HWiNFO or controlled A/B tests."
@@ -103,6 +115,8 @@ def write_report(store: Storage, sid: str, out_dir: Path) -> list[Path]:
         ("GpuIntel", "Clock", "intel_gpu_clock.png", "MHz"),
         ("Cpu", "Power", "cpu_power.png", "W"),
         ("GpuIntel", "Load", "intel_gpu_load.png", "%"),
+        ("WindowsPerfCounter", "Performance", "cpu_performance_percent.png", "%"),
+        ("AcpiThermalZone", "Temperature", "acpi_thermal_zones.png", "C"),
     ]:
         rows = store.db.execute(
             """SELECT substr(a.timestamp_utc, 1, 16) AS minute, s.id,
@@ -131,7 +145,12 @@ def write_report(store: Storage, sid: str, out_dir: Path) -> list[Path]:
         )
         selected = {key: series[key] for key in ranked[:8]}
         target = out_dir / filename
-        if _draw_series(target, f"{hardware_type} {sensor_type} (minute averages)", unit, selected):
+        title = f"{hardware_type} {sensor_type} (minute averages)"
+        if hardware_type == "AcpiThermalZone":
+            title += " — NOT CPU package"
+        if hardware_type == "WindowsPerfCounter":
+            title += " — relative performance, NOT MHz"
+        if _draw_series(target, title, unit, selected):
             created.append(target)
 
     rows = store.db.execute(

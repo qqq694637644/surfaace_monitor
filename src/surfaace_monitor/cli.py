@@ -10,10 +10,14 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .comparison import write_comparison
 from .monitor import executable_command, run_monitor
 from .presentmon import import_csv
 from .report import session_summary, write_report
 from .storage import Storage
+from .windows_telemetry import (
+    WindowsProcessorPerformance, pawnio_installed, read_acpi_zones
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -68,9 +72,36 @@ def doctor(args: argparse.Namespace) -> int:
                     f"    {sensor.get('name')}: {sensor.get('value')} "
                     f"{sensor.get('unit', '')}"
                 )
-    for needed in ("Cpu", "GpuIntel"):
-        if needed not in grouped:
-            print(f"WARNING: {needed} sensors unavailable on this hardware/driver.")
+    for device, metric in [
+        ("Cpu", "Temperature"), ("Cpu", "Clock"),
+        ("GpuIntel", "Temperature"), ("GpuIntel", "Clock")
+    ]:
+        if not any(s.get("sensor_type") == metric for s in grouped.get(device, [])):
+            print(f"WARNING: {device} {metric} is unavailable on this hardware/driver.")
+    installed = pawnio_installed()
+    if installed is False:
+        print(
+            "WARNING: PawnIO is not installed. CPU temperature/clock sensors may "
+            "require the official signed PawnIO driver. No driver was installed."
+        )
+    performance = WindowsProcessorPerformance()
+    if performance.open():
+        values = performance.read_sensors()
+        performance.close()
+        if values:
+            print(
+                f"Windows PDH Processor Performance: {values[0]['value']:.1f}% "
+                "(relative to nominal performance, NOT actual MHz)"
+            )
+    try:
+        zones = read_acpi_zones()
+        if zones:
+            print(
+                f"Windows ACPI thermal zones: {len(zones)} "
+                "(firmware zones, NOT CPU-package sensors); opt in with --acpi-zones"
+            )
+    except (OSError, ValueError) as error:
+        LOG.debug("ACPI zone probe: %s", error)
     if args.presentmon:
         print(
             "PresentMon executable: "
@@ -102,6 +133,10 @@ def _parser() -> argparse.ArgumentParser:
     monitor.add_argument("--tag", default="baseline", help="E.g. baseline, PL2-12W")
     monitor.add_argument("--interval", type=float, default=1.0, help="Sensor seconds, min 0.25")
     monitor.add_argument("--duration", type=float, help="Stop after N seconds; default until Ctrl+C")
+    monitor.add_argument(
+        "--acpi-zones", action="store_true",
+        help="Also poll Windows ACPI firmware thermal zones every 30 seconds"
+    )
     monitor.set_defaults(handler=_monitor)
 
     sessions = commands.add_parser("sessions", help="List recorded sessions")
@@ -120,6 +155,15 @@ def _parser() -> argparse.ArgumentParser:
     report.add_argument("--out", default="reports/latest")
     report.add_argument("--summary-only", action="store_true", help="No matplotlib needed")
     report.set_defaults(handler=_report)
+
+    compare = commands.add_parser(
+        "compare", help="Compare two baseline/variant sessions using matched sensor IDs"
+    )
+    compare.add_argument("--db", default="recordings/surface.db")
+    compare.add_argument("--baseline", required=True, help="Baseline session ID")
+    compare.add_argument("--variant", required=True, help="Comparison session ID")
+    compare.add_argument("--out", default="reports/comparison.json")
+    compare.set_defaults(handler=_compare)
 
     import_cmd = commands.add_parser("import-presentmon", help="Import an existing PresentMon CSV")
     import_cmd.add_argument("--db", default="recordings/surface.db")
@@ -146,7 +190,8 @@ def _monitor(args: argparse.Namespace) -> int:
                 ), interval_ms=interval_ms, label=args.tag,
                 game_name=args.process, presentmon=(
                     str(Path(args.presentmon).resolve()) if args.presentmon else None
-                ), capture_dir=Path(args.captures), duration=args.duration
+                ), capture_dir=Path(args.captures), duration=args.duration,
+                acpi_zones=args.acpi_zones
             )
         except KeyboardInterrupt:
             print("Stopped by Ctrl+C.")
@@ -205,6 +250,15 @@ def _import(args: argparse.Namespace) -> int:
             {"csv": str(csv_path), "rows": count, "timestamped": timestamped}
         )
     print(f"Imported {count} frames, {timestamped} with absolute timestamps.")
+    return 0
+
+
+def _compare(args: argparse.Namespace) -> int:
+    with Storage(args.db) as store:
+        output = write_comparison(
+            store, args.baseline, args.variant, Path(args.out)
+        )
+    print(output)
     return 0
 
 

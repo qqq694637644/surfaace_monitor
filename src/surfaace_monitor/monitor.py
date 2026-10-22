@@ -12,6 +12,7 @@ import psutil
 from .bridge_client import BridgeClient, default_bridge_command
 from .presentmon import CaptureManager
 from .storage import Storage
+from .windows_telemetry import AcpiThermalCollector, WindowsProcessorPerformance
 
 LOGGER = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ def run_monitor(
     duration: float | None = None,
     game_finder: Callable[[str], int | None] = find_process,
     status_interval: float = 30.0,
+    acpi_zones: bool = False,
 ) -> str:
     if interval_ms < 250 or interval_ms > 60000:
         raise ValueError("Bridge interval must be 250..60000 milliseconds")
@@ -51,6 +53,18 @@ def run_monitor(
         bridge=" ".join(bridge_command), presentmon=presentmon
     )
     captures = CaptureManager(store, sid, presentmon, capture_dir)
+    cpu_performance = WindowsProcessorPerformance()
+    if cpu_performance.open():
+        store.add_event(sid, "windows_pdh_enabled", {
+            "counter": WindowsProcessorPerformance.COUNTER,
+            "note": "Relative performance %, NOT actual clock MHz"
+        })
+    acpi = AcpiThermalCollector() if acpi_zones else None
+    if acpi is not None:
+        acpi.start()
+        store.add_event(sid, "acpi_zones_enabled", {
+            "note": "Firmware thermal zones are NOT CPU package temperatures"
+        })
     bridge: BridgeClient | None = None
     game_pid: int | None = None
     total = 0
@@ -59,6 +73,7 @@ def run_monitor(
     next_check = startup
     next_status = startup + status_interval
     next_retry = startup
+    next_capture_retry = startup
     last_sample = startup
     print(f"Session: {sid} | Tag: {label} | Game: {game_name}", flush=True)
 
@@ -87,8 +102,20 @@ def run_monitor(
                         except OSError as error:
                             store.add_event(sid, "presentmon_start_error", {"error": str(error)})
                             LOGGER.warning("PresentMon cannot start: %s", error)
-                elif captures.check_exited():
-                    LOGGER.warning("PresentMon exited while the game is still running")
+                            next_capture_retry = now + 5.0
+                elif game_pid is not None and presentmon:
+                    if captures.check_exited():
+                        LOGGER.warning("PresentMon exited while game is running; retrying")
+                        next_capture_retry = now + 5.0
+                    if captures.process is None and now >= next_capture_retry:
+                        try:
+                            captures.start(game_pid)
+                        except OSError as error:
+                            store.add_event(
+                                sid, "presentmon_restart_error", {"error": str(error)}
+                            )
+                            LOGGER.warning("PresentMon restart failed: %s", error)
+                            next_capture_retry = now + 5.0
                 next_check = now + 1.0
 
             if bridge is None and now >= next_retry:
@@ -107,12 +134,21 @@ def run_monitor(
             packet = bridge.next_frame(timeout=0.25) if bridge is not None else None
             if packet is not None:
                 try:
+                    # Separate sensor identity makes the PDH percentage impossible to
+                    # mistake for a LibreHardwareMonitor CPU clock or temperature.
+                    packet["sensors"].extend(cpu_performance.read_sensors())
                     store.add_sample(sid, packet, game_pid)
                     last_sample = time.monotonic()
                     total += 1
                 except (KeyError, TypeError, ValueError) as error:
                     store.add_event(sid, "sensor_packet_invalid", {"error": str(error)})
                     LOGGER.warning("Ignoring invalid sensor packet: %s", error)
+
+            if acpi is not None:
+                acpi_packet = acpi.next_packet()
+                if acpi_packet is not None:
+                    store.add_sample(sid, acpi_packet, game_pid)
+                    total += 1
 
             if bridge is not None:
                 if bridge.dropped > last_drop_count:
@@ -136,6 +172,9 @@ def run_monitor(
                 )
                 next_status = time.monotonic() + status_interval
     finally:
+        cpu_performance.close()
+        if acpi is not None:
+            acpi.close()
         if bridge is not None:
             bridge.close()
         captures.stop()

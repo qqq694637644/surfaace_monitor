@@ -104,7 +104,8 @@ class CaptureManager:
         if not self.executable:
             return
         self.directory.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        # Avoid overwriting a previous capture on fast process restarts.
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         path = self.directory / f"presentmon_{self.sid[:8]}_{game_pid}_{stamp}.csv"
         logfile = path.with_suffix(".log")
         handle = logfile.open("w", encoding="utf-8")
